@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "strict": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true,
+    "verbatimModuleSyntax": true,
+    "target": "esnext",
+    "module": "NodeNext"
+  },
+
+  "include": ["src/**/*.ts"]
+}

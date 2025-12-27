@@ -15,32 +15,84 @@ A complete filesystem with Git-like version control implemented entirely in Post
 ## Installation
 
 ```bash
-npm install @your-org/sql-filesystem
+npm install sql-fs
 ```
 
 ## Quick Start
 
 ```javascript
+import fs from "node:fs/promises";
 import { PGlite } from "@electric-sql/pglite";
 
 // Initialize database
 const db = new PGlite();
 await db.exec(
   await fs.readFile(
-    "./node_modules/@your-org/sql-filesystem/schema.sql",
+    new URL("./node_modules/sql-fs/src/fs.sql", import.meta.url),
     "utf8"
   )
 );
 
-// Create a repository
-await db.query("INSERT INTO fs.repositories (name) VALUES ('my-project')");
-
-// Get repository info
-const repos = await db.query(
-  "SELECT * FROM fs.repositories WHERE name = 'my-project'"
+// Create a repository (auto-creates main branch)
+const {
+  rows: [{ id: repoId, default_branch_id: mainBranchId }],
+} = await db.query(
+  "INSERT INTO fs.repositories (name) VALUES ('my-project') RETURNING id, default_branch_id"
 );
-const repoId = repos.rows[0].id;
+
+// Root commit (only commit where parent_commit_id can be NULL)
+const {
+  rows: [{ id: rootCommitId }],
+} = await db.query(
+  `INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+   VALUES ($1, NULL, 'Initial commit') RETURNING id`,
+  [repoId]
+);
+
+await db.query(
+  `INSERT INTO fs.files (commit_id, path, content)
+   VALUES ($1, '/README.md', '# My Project\n')`,
+  [rootCommitId]
+);
+
+// Set the branch head for the first commit (finalize requires a parent)
+await db.query(
+  "UPDATE fs.branches SET head_commit_id = $1 WHERE id = $2",
+  [rootCommitId, mainBranchId]
+);
+
+// Next commits: set parent to current head + finalize to advance the branch
+const {
+  rows: [{ head_commit_id: parentCommitId }],
+} = await db.query(
+  "SELECT head_commit_id FROM fs.branches WHERE id = $1",
+  [mainBranchId]
+);
+
+const {
+  rows: [{ id: newCommitId }],
+} = await db.query(
+  `INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+   VALUES ($1, $2, 'Add utils') RETURNING id`,
+  [repoId, parentCommitId]
+);
+
+await db.query(
+  `INSERT INTO fs.files (commit_id, path, content)
+   VALUES ($1, '/src/utils.js', 'export const ok = true;')`,
+  [newCommitId]
+);
+
+// Applies non-conflicting changes and advances the branch head
+await db.query("SELECT * FROM fs.finalize_commit($1, $2)", [
+  newCommitId,
+  mainBranchId,
+]);
 ```
+
+Use `fs.finalize_commit` any time you want to apply a commit and move a branch
+head (fast-forward or merge). Only the very first commit on a branch uses a
+direct `UPDATE` because `parent_commit_id` is `NULL`.
 
 ## Core Concepts
 
@@ -115,23 +167,45 @@ WHERE id = 'repo-id';
 ### 3. Making Commits
 
 ```sql
--- Create commit on main branch (updates branch head)
-INSERT INTO fs.commits (repository_id, message)
-VALUES ('repo-id', 'Add user authentication')
+-- Create a commit on main (fast-forward finalize)
+WITH main_branch AS (
+  SELECT id AS branch_id, head_commit_id
+  FROM fs.branches
+  WHERE repository_id = 'repo-id' AND name = 'main'
+)
+INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+SELECT 'repo-id', head_commit_id, 'Add user authentication'
+FROM main_branch
 RETURNING id INTO commit_id;
 
--- Manually update branch head
-UPDATE fs.branches SET head_commit_id = commit_id
-WHERE repository_id = 'repo-id' AND name = 'main';
+-- Write files for that commit
+INSERT INTO fs.files (commit_id, path, content)
+VALUES (commit_id, '/src/auth.js', 'export const auth = true;');
 
--- Create commit with parent (for branching/merging)
-INSERT INTO fs.commits (repository_id, message, parent_commit_id)
-VALUES ('repo-id', 'Implement login form', 'parent-commit-id')
+-- Apply changes and advance branch head
+SELECT * FROM fs.finalize_commit(
+  commit_id,
+  (SELECT branch_id FROM main_branch)
+);
+
+-- Create a commit on a feature branch based on its head
+WITH feature_branch AS (
+  SELECT id AS branch_id, head_commit_id
+  FROM fs.branches
+  WHERE repository_id = 'repo-id' AND name = 'feature/user-auth'
+)
+INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+SELECT 'repo-id', head_commit_id, 'Implement login form'
+FROM feature_branch
 RETURNING id INTO commit_id;
 
--- Manually update branch head
-UPDATE fs.branches SET head_commit_id = commit_id
-WHERE repository_id = 'repo-id' AND name = 'feature/user-auth';
+INSERT INTO fs.files (commit_id, path, content)
+VALUES (commit_id, '/src/login.js', 'export function login() { return true; }');
+
+SELECT * FROM fs.finalize_commit(
+  commit_id,
+  (SELECT branch_id FROM feature_branch)
+);
 
 -- List commit history/tree for a repository
 WITH RECURSIVE commit_history AS (
@@ -159,14 +233,16 @@ ORDER BY depth ASC, created_at DESC;
 ### 4. File Operations
 
 ```sql
--- First create a commit
-INSERT INTO fs.commits (repository_id, message)
-VALUES ('repo-id', 'Add source files')
+-- First create a commit anchored to the branch head
+WITH main_branch AS (
+  SELECT id AS branch_id, head_commit_id
+  FROM fs.branches
+  WHERE repository_id = 'repo-id' AND name = 'main'
+)
+INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+SELECT 'repo-id', head_commit_id, 'Add source files'
+FROM main_branch
 RETURNING id INTO commit_id;
-
--- Manually update branch head
-UPDATE fs.branches SET head_commit_id = commit_id
-WHERE repository_id = 'repo-id' AND name = 'main';
 
 -- Add files to the commit
 INSERT INTO fs.files (commit_id, path, content)
@@ -178,6 +254,12 @@ VALUES
 -- Update a file (creates new version)
 INSERT INTO fs.files (commit_id, path, content)
 VALUES (commit_id, '/src/index.js', 'console.log("Hello, updated world!");');
+
+-- Apply the commit and advance the branch
+SELECT * FROM fs.finalize_commit(
+  commit_id,
+  (SELECT branch_id FROM main_branch)
+);
 
 -- Read current file content
 SELECT fs.read_file('commit-id', '/src/index.js') as content;
@@ -217,29 +299,43 @@ VALUES ('repo-id', 'feature/dark-mode')
 RETURNING id INTO feature_branch_id;
 
 -- Work on feature branch
-INSERT INTO fs.commits (repository_id, message)
-VALUES ('repo-id', 'Add dark mode styles')
+WITH feature_branch AS (
+  SELECT id AS branch_id, head_commit_id
+  FROM fs.branches
+  WHERE id = feature_branch_id
+)
+INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+SELECT 'repo-id', head_commit_id, 'Add dark mode styles'
+FROM feature_branch
 RETURNING id INTO feature_commit_id;
-
--- Manually update branch head
-UPDATE fs.branches SET head_commit_id = feature_commit_id
-WHERE id = feature_branch_id;
 
 INSERT INTO fs.files (commit_id, path, content)
 VALUES (feature_commit_id, '/src/theme.css', '.dark { background: black; color: white; }');
 
--- Continue working on main branch
-INSERT INTO fs.commits (repository_id, message)
-VALUES ('repo-id', 'Add user preferences')
-RETURNING id INTO main_commit_id;
+SELECT * FROM fs.finalize_commit(
+  feature_commit_id,
+  (SELECT branch_id FROM feature_branch)
+);
 
--- Manually update branch head
-UPDATE fs.branches SET head_commit_id = main_commit_id
-WHERE repository_id = 'repo-id' AND name = 'main';
+-- Continue working on main branch
+WITH main_branch AS (
+  SELECT id AS branch_id, head_commit_id
+  FROM fs.branches
+  WHERE repository_id = 'repo-id' AND name = 'main'
+)
+INSERT INTO fs.commits (repository_id, parent_commit_id, message)
+SELECT 'repo-id', head_commit_id, 'Add user preferences'
+FROM main_branch
+RETURNING id INTO main_commit_id;
 
 INSERT INTO fs.files (commit_id, path, content)
 VALUES (main_commit_id, '/src/preferences.js', 'const theme = localStorage.getItem("theme");');
 
+SELECT * FROM fs.finalize_commit(
+  main_commit_id,
+  (SELECT branch_id FROM main_branch)
+);
+****
 -- View different branch contents
 SELECT 'Main branch:' as branch, path, LEFT(content, 50) as content_preview
 FROM fs.get_commit_snapshot((

@@ -320,7 +320,7 @@ END LOOP;
 IF p_path ~ '[<>"|?*:]' THEN RAISE EXCEPTION 'Path contains characters invalid on Windows: < > : " | ? *';
 END IF;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 /*
  fs.rebase_branch(p_branch_id uuid, p_onto_branch_id uuid, p_message text default NULL)
  -> TABLE(operation text, repository_id uuid, branch_id uuid, onto_branch_id uuid,
@@ -813,7 +813,7 @@ rebased_commit_id := v_rebased_commit_id;
 new_branch_head_commit_id := v_rebased_commit_id;
 RETURN NEXT;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
 /*
  fs._normalize_path(p_path text) -> text
  --------------------------------------
@@ -858,7 +858,7 @@ IF LENGTH(normalized_path) > 4096 THEN RAISE EXCEPTION 'Path is too long (maximu
 END IF;
 RETURN normalized_path;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 /*
  fs._normalize_path_prefix(p_path_prefix text) -> text
  ----------------------------------------------------
@@ -902,7 +902,7 @@ IF LENGTH(normalized_prefix) > 4096 THEN RAISE EXCEPTION 'Path is too long (maxi
 END IF;
 RETURN normalized_prefix;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql IMMUTABLE PARALLEL SAFE;
 -- ========================================
 -- WRITE-TIME HELPERS (TRIGGER FUNCTIONS)
 -- ========================================
@@ -960,7 +960,7 @@ AND NOT EXISTS (
 END IF;
 RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
 -- ========================================
 -- TRIGGERS
 -- ========================================
@@ -990,7 +990,7 @@ END IF;
 END IF;
 RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
 /*
  fs._repositories_after_insert() -> trigger
  -----------------------------------------
@@ -1014,7 +1014,7 @@ SET default_branch_id = branch_id
 WHERE id = NEW.id;
 RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
 /*
  fs._branches_before_insert() -> trigger
  --------------------------------------
@@ -1048,7 +1048,7 @@ NEW.head_commit_id := resolved_head_commit_id;
 END IF;
 RETURN NEW;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
 /*
  Trigger wiring
  --------------
@@ -1130,7 +1130,7 @@ FROM fs.commits c
   JOIN fs.files f ON c.id = f.commit_id
 WHERE c.id = p_commit_id;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 /*
  fs.get_commit_snapshot(p_commit_id uuid, p_path_prefix text default NULL) -> TABLE(...)
  -------------------------------------------------------------------------------------
@@ -1222,7 +1222,7 @@ FROM fs.commits c
 WHERE c.id = p_commit_id
 ORDER BY sf.path;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 /*
  fs._get_commit_snapshot_with_content(p_commit_id uuid, p_path_prefix text default NULL)
  -> TABLE(repository_id uuid, repository_name text, commit_id uuid,
@@ -1269,7 +1269,7 @@ SELECT s.repository_id,
 FROM fs.get_commit_snapshot(p_commit_id, p_path_prefix) s
 ORDER BY s.path;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 -- ========================================
 -- ESSENTIAL FUNCTIONS
 -- ========================================
@@ -1330,7 +1330,7 @@ END LOOP;
 -- File not found in any ancestor commit
 RETURN NULL;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 /*
  fs.get_file_history(p_commit_id uuid, p_file_path text)
  -> TABLE(commit_id uuid, content text | NULL, is_deleted boolean, is_symlink boolean)
@@ -1391,7 +1391,7 @@ FROM commit_tree ct
 WHERE f.id IS NOT NULL;
 -- Only include commits that have this file
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 -- ========================================
 -- MERGE / REBASE HELPERS (CONFLICT DETECTION)
 -- ========================================
@@ -1476,7 +1476,7 @@ IF v_base_commit_id IS NULL THEN RAISE EXCEPTION 'No common ancestor found (unex
 END IF;
 RETURN v_base_commit_id;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 /*
  fs.get_conflicts(p_left_commit_id uuid, p_right_commit_id uuid) -> TABLE(...)
  ----------------------------------------------------------------------------
@@ -1619,7 +1619,7 @@ WHERE d.left_changed
   AND d.sides_differ
 ORDER BY d.path;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql STABLE PARALLEL SAFE;
 -- ========================================
 -- MERGE / REBASE OPERATIONS (LINEAR HISTORY)
 -- ========================================
@@ -2006,4 +2006,4 @@ new_target_head_commit_id := CASE
 END;
 RETURN NEXT;
 END;
-$$ LANGUAGE plpgsql;
+$$ LANGUAGE plpgsql VOLATILE PARALLEL UNSAFE;
